@@ -1,0 +1,19 @@
+Feature Order:
+PM10
+PM25
+PM1
+O3
+CO
+NO
+NO2
+NOx
+CO2
+
+Total Samples: 20816
+Feature Count: 9
+Sampling Interval: 1 hour (dominant)
+
+Prediction Target: PM25(t+1)
+Window Size: 6
+Input Dimension: 54
+Output Dimension: 1

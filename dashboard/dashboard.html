@@ -1,0 +1,1106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PM2.5 Prediction Dashboard – FPGA / ESP32</title>
+  <meta name="description" content="Real-time PM2.5 prediction dashboard using ZPHS01B sensor and MLP model inference on ESP32 data." />
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+  <!-- Luxon (time parsing for Chart.js) -->
+  <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
+
+  <style>
+    /* ─── RESET & TOKENS ─────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #070b14;
+      --surface:   rgba(255,255,255,0.04);
+      --border:    rgba(255,255,255,0.08);
+      --accent:    #38bdf8;
+      --accent2:   #818cf8;
+      --good:      #22c55e;
+      --moderate:  #eab308;
+      --unhealthy: #f97316;
+      --bad:       #ef4444;
+      --worse:     #a855f7;
+      --hazard:    #7f1d1d;
+      --text:      #e2e8f0;
+      --muted:     #94a3b8;
+      --glow:      rgba(56,189,248,0.18);
+      --r:         16px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ─── ANIMATED BG GRID ───────────────────────────────────────── */
+    body::before {
+      content: '';
+      position: fixed; inset: 0; z-index: 0;
+      background:
+        radial-gradient(ellipse 80% 50% at 20% 10%, rgba(56,189,248,0.07) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 40% at 80% 80%, rgba(129,140,248,0.06) 0%, transparent 60%);
+      pointer-events: none;
+    }
+
+    /* ─── LAYOUT ─────────────────────────────────────────────────── */
+    .wrapper {
+      position: relative; z-index: 1;
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 24px 28px;
+    }
+
+    /* ─── HEADER ─────────────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+
+    .header-left h1 {
+      font-size: 1.6rem;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .header-left .subtitle {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.75rem;
+      padding: 5px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .badge .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--muted);
+      transition: background 0.4s;
+    }
+    .badge.live .dot { background: var(--good); box-shadow: 0 0 6px var(--good); animation: pulse 2s infinite; }
+    .badge.error .dot { background: var(--bad); }
+
+    #last-update {
+      font-size: 0.72rem;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .btn {
+      cursor: pointer;
+      font: 500 0.78rem 'Inter', sans-serif;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 8px;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .btn:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.16); }
+    .btn.primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border-color: transparent;
+      color: #070b14;
+      font-weight: 700;
+    }
+    .btn.primary:hover { opacity: 0.88; }
+
+    /* ─── GLASS CARD ─────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      padding: 20px 24px;
+      backdrop-filter: blur(16px);
+      position: relative;
+      overflow: hidden;
+      transition: border-color 0.3s;
+    }
+    .card::before {
+      content: '';
+      position: absolute; inset: 0;
+      background: linear-gradient(135deg, rgba(255,255,255,0.03), transparent 60%);
+      pointer-events: none;
+    }
+
+    .card-label {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    /* ─── GRID LAYOUTS ───────────────────────────────────────────── */
+    .top-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr auto;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .main-row {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .sensors-row {
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .bottom-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    /* ─── PM GAUGES (top 3) ──────────────────────────────────────── */
+    .pm-card {
+      text-align: center;
+    }
+
+    .pm-value {
+      font-size: 3.2rem;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+      transition: color 0.5s;
+    }
+    .pm-unit  { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
+    .pm-name  { font-size: 0.9rem; font-weight: 700; letter-spacing: -0.02em; margin-top: 4px; }
+
+    .pm-bar {
+      margin-top: 12px;
+      height: 5px;
+      background: rgba(255,255,255,0.07);
+      border-radius: 99px;
+      overflow: hidden;
+    }
+    .pm-bar-fill {
+      height: 100%;
+      border-radius: 99px;
+      transition: width 0.8s cubic-bezier(0.4,0,0.2,1), background 0.5s;
+    }
+
+    /* ─── PREDICTION CARD ────────────────────────────────────────── */
+    .pred-card {
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+    }
+    .pred-card .clock-icon {
+      font-size: 1.3rem;
+      margin-bottom: 6px;
+    }
+    .pred-value {
+      font-size: 2.8rem;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      transition: all 0.5s;
+    }
+    .pred-label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
+    .pred-aqi-badge {
+      margin-top: 8px;
+      padding: 4px 12px;
+      border-radius: 99px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      display: inline-block;
+      transition: background 0.5s;
+    }
+    .buffer-info {
+      font-size: 0.68rem;
+      color: var(--muted);
+      margin-top: 8px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* ─── AQI INDICATOR ──────────────────────────────────────────── */
+    .aqi-card {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .aqi-scale {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      margin-top: 8px;
+    }
+    .aqi-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.7rem;
+    }
+    .aqi-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .aqi-row span { color: var(--muted); flex: 1; }
+    .aqi-row.active span { color: var(--text); font-weight: 600; }
+    .aqi-row.active .aqi-dot { box-shadow: 0 0 8px currentColor; }
+
+    /* ─── CHART CARD ─────────────────────────────────────────────── */
+    .chart-card {
+      min-height: 300px;
+    }
+    .chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .chart-title {
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .legend {
+      display: flex;
+      gap: 14px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.68rem;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .legend-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+    }
+    canvas { width: 100% !important; }
+
+    /* ─── MINI SENSOR CARDS ──────────────────────────────────────── */
+    .sensor-mini {
+      text-align: center;
+      padding: 14px 10px;
+    }
+    .sensor-mini .sm-val {
+      font-size: 1.55rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.03em;
+    }
+    .sensor-mini .sm-name { font-size: 0.68rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px; }
+    .sensor-mini .sm-unit { font-size: 0.62rem; color: var(--muted); margin-top: 1px; }
+
+    /* ─── WINDOW BUFFER DISPLAY ──────────────────────────────────── */
+    .window-card {}
+    .window-grid {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .window-slot {
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.02);
+      padding: 8px 6px;
+      text-align: center;
+      transition: all 0.4s;
+    }
+    .window-slot.filled {
+      border-color: rgba(56,189,248,0.25);
+      background: rgba(56,189,248,0.05);
+    }
+    .window-slot.active {
+      border-color: var(--accent);
+      background: rgba(56,189,248,0.1);
+      box-shadow: 0 0 12px rgba(56,189,248,0.15);
+    }
+    .slot-hour { font-size: 0.6rem; color: var(--muted); margin-bottom: 4px; }
+    .slot-val  {
+      font-size: 0.85rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .slot-ts   { font-size: 0.56rem; color: var(--muted); margin-top: 3px; font-family: 'JetBrains Mono'; }
+
+    /* ─── LOG / ESP32 INFO ───────────────────────────────────────── */
+    .info-card code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.72rem;
+      display: block;
+      color: var(--accent);
+      padding: 3px 0;
+    }
+    .info-card .sample-json {
+      background: rgba(0,0,0,0.4);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      margin-top: 8px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.68rem;
+      color: #a5f3fc;
+      white-space: pre-wrap;
+    }
+
+    /* ─── DIVIDER ─────────────────────────────────────────────────── */
+    .section-title {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+      margin: 20px 0 10px;
+      padding-left: 4px;
+    }
+
+    /* ─── WARNING BANNER ─────────────────────────────────────────────── */
+    #warning-banner {
+      display: none;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 14px 18px;
+      border-radius: 12px;
+      border-left: 4px solid;
+      margin-bottom: 16px;
+      backdrop-filter: blur(12px);
+      animation: fadeUp 0.4s ease both;
+    }
+    #warning-banner.marginal {
+      background: rgba(234,179,8,0.08);
+      border-color: #eab308;
+    }
+    #warning-banner.severe {
+      background: rgba(239,68,68,0.10);
+      border-color: #ef4444;
+    }
+    .warn-icon { font-size: 1.2rem; flex-shrink: 0; margin-top: 1px; }
+    .warn-body { flex: 1; }
+    .warn-title {
+      font-size: 0.78rem;
+      font-weight: 700;
+      margin-bottom: 3px;
+    }
+    .warn-title.marginal { color: #eab308; }
+    .warn-title.severe   { color: #ef4444; }
+    .warn-msg   { font-size: 0.72rem; color: var(--muted); line-height: 1.5; }
+    .warn-stats {
+      margin-top: 8px;
+      display: flex;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+    .warn-stat {
+      font-size: 0.68rem;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--muted);
+    }
+    .warn-stat strong { color: var(--text); }
+
+    /* ─── ANIMATIONS ─────────────────────────────────────────────── */
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(16px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .card { animation: fadeUp 0.45s ease both; }
+
+    .flash {
+      animation: flashAnim 0.5s ease;
+    }
+    @keyframes flashAnim {
+      0%   { background: rgba(56,189,248,0.12); }
+      100% { background: var(--surface); }
+    }
+
+    /* ─── RESPONSIVE ─────────────────────────────────────────────── */
+    @media (max-width: 1100px) {
+      .top-row      { grid-template-columns: 1fr 1fr; }
+      .main-row     { grid-template-columns: 1fr; }
+      .sensors-row  { grid-template-columns: repeat(4, 1fr); }
+      .bottom-row   { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 640px) {
+      .top-row      { grid-template-columns: 1fr; }
+      .sensors-row  { grid-template-columns: repeat(2, 1fr); }
+      .window-grid  { grid-template-columns: repeat(3, 1fr); }
+      .wrapper      { padding: 16px; }
+      .pm-value     { font-size: 2.4rem; }
+    }
+
+    /* ─── TOOLTIP ────────────────────────────────────────────────── */
+    .tooltip-wrapper { position: relative; display: inline-flex; }
+    .tooltip-text {
+      position: absolute; bottom: calc(100% + 6px); left: 50%;
+      transform: translateX(-50%);
+      background: #1e293b;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 0.68rem;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.2s;
+      z-index: 99;
+    }
+    .tooltip-wrapper:hover .tooltip-text { opacity: 1; }
+
+    /* ─── NOTIFICATION TOAST ─────────────────────────────────────── */
+    #toast {
+      position: fixed;
+      bottom: 24px; right: 24px;
+      background: #1e293b;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 20px;
+      font-size: 0.78rem;
+      color: var(--text);
+      z-index: 999;
+      transform: translateY(80px);
+      opacity: 0;
+      transition: all 0.35s cubic-bezier(0.34,1.56,0.64,1);
+    }
+    #toast.show { transform: translateY(0); opacity: 1; }
+  </style>
+</head>
+<body>
+<div class="wrapper">
+
+  <!-- ── HEADER ─────────────────────────────────────────────────── -->
+  <header>
+    <div class="header-left">
+      <h1>⚡ PM2.5 Prediction Dashboard</h1>
+      <p class="subtitle">ZPHS01B &rarr; ESP32 &rarr; MLP Inference (54→16→8→1)</p>
+    </div>
+    <div class="header-right">
+      <span id="status-badge" class="badge">
+        <span class="dot"></span>
+        <span id="status-text">Waiting…</span>
+      </span>
+      <span id="last-update">Never updated</span>
+      <button class="btn primary" id="sim-btn" onclick="runSimulation()">▶ Simulate</button>
+    </div>
+  </header>
+
+  <!-- ── TOP ROW: PM25 | PM10 | PM1 | PREDICTION ─────────────── -->
+  <div class="top-row">
+
+    <div class="card pm-card" id="card-pm25">
+      <div class="card-label">PM 2.5 — Current</div>
+      <div class="pm-value" id="val-pm25" style="color:var(--accent)">–</div>
+      <div class="pm-unit">µg/m³</div>
+      <div class="pm-name">Fine Particles</div>
+      <div class="pm-bar"><div class="pm-bar-fill" id="bar-pm25" style="width:0%;background:var(--accent)"></div></div>
+    </div>
+
+    <div class="card pm-card" id="card-pm10">
+      <div class="card-label">PM 10 — Current</div>
+      <div class="pm-value" id="val-pm10" style="color:var(--accent2)">–</div>
+      <div class="pm-unit">µg/m³</div>
+      <div class="pm-name">Coarse Particles</div>
+      <div class="pm-bar"><div class="pm-bar-fill" id="bar-pm10" style="width:0%;background:var(--accent2)"></div></div>
+    </div>
+
+    <div class="card pm-card" id="card-pm1">
+      <div class="card-label">PM 1.0 — Current</div>
+      <div class="pm-value" id="val-pm1" style="color:#34d399">–</div>
+      <div class="pm-unit">µg/m³</div>
+      <div class="pm-name">Ultrafine Particles</div>
+      <div class="pm-bar"><div class="pm-bar-fill" id="bar-pm1" style="width:0%;background:#34d399"></div></div>
+    </div>
+
+    <div class="card pred-card" id="card-pred" style="min-width:180px">
+      <div class="clock-icon">🔮</div>
+      <div class="pred-label">Next Hour Prediction</div>
+      <div class="pred-value" id="val-pred">–</div>
+      <div class="pred-label">PM 2.5 (µg/m³)</div>
+      <div class="pred-aqi-badge" id="pred-aqi-badge" style="background:rgba(255,255,255,0.06)">–</div>
+      <div class="buffer-info" id="buffer-info">Buffer: 0 / 6 readings</div>
+    </div>
+
+  </div>
+
+  <!-- ── MAIN ROW: CHART | AQI ─────────────────────────────────── -->
+  <div class="main-row">
+
+    <div class="card chart-card">
+      <div class="chart-header">
+        <div class="chart-title">Particulate Matter — Last 6 Hours</div>
+        <div class="legend">
+          <div class="legend-item"><div class="legend-dot" style="background:#38bdf8"></div>PM2.5</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#818cf8"></div>PM10</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#34d399"></div>PM1</div>
+          <div class="legend-item" id="pred-legend" style="opacity:0.4;">
+            <div class="legend-dot" style="background:#f472b6;"></div>Predicted
+          </div>
+        </div>
+      </div>
+      <canvas id="pm-chart" height="240"></canvas>
+    </div>
+
+    <div class="card aqi-card">
+      <div class="card-label">Air Quality Index (PM 2.5)</div>
+      <div style="font-size:1.8rem;font-weight:800;margin:4px 0 2px;line-height:1" id="aqi-label">–</div>
+      <div style="font-size:0.72rem;color:var(--muted)">Current conditions</div>
+      <div class="aqi-scale">
+        <div class="aqi-row" id="aqi-row-1">
+          <div class="aqi-dot" style="background:#22c55e"></div>
+          <span>Good (0–12)</span>
+        </div>
+        <div class="aqi-row" id="aqi-row-2">
+          <div class="aqi-dot" style="background:#eab308"></div>
+          <span>Moderate (12.1–35.4)</span>
+        </div>
+        <div class="aqi-row" id="aqi-row-3">
+          <div class="aqi-dot" style="background:#f97316"></div>
+          <span>Unhealthy for Sensitive</span>
+        </div>
+        <div class="aqi-row" id="aqi-row-4">
+          <div class="aqi-dot" style="background:#ef4444"></div>
+          <span>Unhealthy (55.5–150.4)</span>
+        </div>
+        <div class="aqi-row" id="aqi-row-5">
+          <div class="aqi-dot" style="background:#a855f7"></div>
+          <span>Very Unhealthy</span>
+        </div>
+        <div class="aqi-row" id="aqi-row-6">
+          <div class="aqi-dot" style="background:#7f1d1d"></div>
+          <span>Hazardous (&gt;250.4)</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── SENSOR ROW ─────────────────────────────────────────────── -->
+  <div class="section-title">Other Sensor Readings</div>
+  <div class="sensors-row">
+    <div class="card sensor-mini">
+      <div class="sm-val" id="val-co2">–</div>
+      <div class="sm-name">CO₂</div>
+      <div class="sm-unit">ppm</div>
+    </div>
+    <div class="card sensor-mini">
+      <div class="sm-val" id="val-o3">–</div>
+      <div class="sm-name">O₃</div>
+      <div class="sm-unit">ppb</div>
+    </div>
+    <div class="card sensor-mini">
+      <div class="sm-val" id="val-co">–</div>
+      <div class="sm-name">CO</div>
+      <div class="sm-unit">mg/m³</div>
+    </div>
+    <div class="card sensor-mini">
+      <div class="sm-val" id="val-no2">–</div>
+      <div class="sm-name">NO₂</div>
+      <div class="sm-unit">ppb</div>
+    </div>
+    <div class="card sensor-mini">
+      <div class="sm-val" id="val-nox">–</div>
+      <div class="sm-name">NOₓ</div>
+      <div class="sm-unit">µg/m³</div>
+    </div>
+    <div class="card sensor-mini">
+      <div class="sm-val" id="val-temp">–</div>
+      <div class="sm-name">Temp</div>
+      <div class="sm-unit">°C</div>
+    </div>
+    <div class="card sensor-mini">
+      <div class="sm-val" id="val-hum">–</div>
+      <div class="sm-name">Humidity</div>
+      <div class="sm-unit">%RH</div>
+    </div>
+    <div class="card sensor-mini">
+      <div class="sm-val" id="val-ch2o">–</div>
+      <div class="sm-name">HCHO</div>
+      <div class="sm-unit">mg/m³</div>
+    </div>
+  </div>
+
+  <!-- ── WARNING BANNER (training distribution) ───────────────────── -->
+  <div id="warning-banner">
+    <div class="warn-icon" id="warn-icon">⚠️</div>
+    <div class="warn-body">
+      <div class="warn-title" id="warn-title"></div>
+      <div class="warn-msg"  id="warn-msg"></div>
+      <div class="warn-stats">
+        <div class="warn-stat">Your avg: <strong id="warn-your-avg">–</strong> µg/m³</div>
+        <div class="warn-stat">Training mean: <strong id="warn-train-mean">–</strong> µg/m³</div>
+        <div class="warn-stat">Training 5th–95th: <strong id="warn-train-range">–</strong> µg/m³</div>
+        <div class="warn-stat">Z-score: <strong id="warn-zscore">–</strong>σ</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── BOTTOM ROW: 6-hr WINDOW | ESP32 SETUP ─────────────────── -->
+  <div class="bottom-row">
+
+    <div class="card window-card">
+      <div class="card-label">6-Hour Input Window (model input)</div>
+      <div style="font-size:0.7rem;color:var(--muted);margin-top:2px;">PM2.5 values feeding the MLP — need all 6 slots filled for prediction</div>
+      <div class="window-grid" id="window-grid">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+
+    <div class="card info-card">
+      <div class="card-label">ESP32 Integration</div>
+      <div style="font-size:0.72rem;color:var(--muted);margin-bottom:6px;">
+        POST sensor readings to this server:
+      </div>
+      <code id="endpoint-url">POST http://&lt;your-server-ip&gt;:5000/api/reading</code>
+      <div class="sample-json" id="sample-json">{
+  "PM1":  23.50,
+  "PM25": 45.20,
+  "PM10": 67.80,
+  "CO2":  430.0,
+  "O3":   12.0,
+  "CO":   0.95,     // optional
+  "NO":   3.10,     // optional
+  "NO2":  5.90,     // optional
+  "NOx":  9.00      // optional
+}</div>
+      <div style="font-size:0.68rem;color:var(--muted);margin-top:10px;">
+        💡 CO / NO / NO₂ / NOₓ are optional — defaults used if omitted.
+      </div>
+    </div>
+
+  </div>
+
+</div><!-- /wrapper -->
+
+<!-- ── TOAST ─────────────────────────────────────────────────────── -->
+<div id="toast"></div>
+
+<!-- ── SCRIPTS ────────────────────────────────────────────────────── -->
+<script>
+// ─── State ─────────────────────────────────────────────────────────
+let chart = null;
+let simIndex = 0;
+let simInterval = null;
+let pollingInterval = null;
+
+const AQI_LEVELS = [
+  { index: 1, label: "Good",                    color: "#22c55e" },
+  { index: 2, label: "Moderate",                color: "#eab308" },
+  { index: 3, label: "Unhealthy for Sensitive", color: "#f97316" },
+  { index: 4, label: "Unhealthy",               color: "#ef4444" },
+  { index: 5, label: "Very Unhealthy",          color: "#a855f7" },
+  { index: 6, label: "Hazardous",               color: "#7f1d1d" },
+];
+
+// ─── Chart Initialization ───────────────────────────────────────────
+function initChart() {
+  const ctx = document.getElementById('pm-chart').getContext('2d');
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        {
+          label: 'PM2.5',
+          data: [],
+          borderColor: '#38bdf8',
+          backgroundColor: 'rgba(56,189,248,0.08)',
+          fill: true,
+          tension: 0.4,
+          pointRadius: 5,
+          pointHoverRadius: 7,
+          borderWidth: 2.5,
+        },
+        {
+          label: 'PM10',
+          data: [],
+          borderColor: '#818cf8',
+          backgroundColor: 'transparent',
+          fill: false,
+          tension: 0.4,
+          pointRadius: 3,
+          borderWidth: 2,
+          borderDash: [6,3],
+        },
+        {
+          label: 'PM1',
+          data: [],
+          borderColor: '#34d399',
+          backgroundColor: 'transparent',
+          fill: false,
+          tension: 0.4,
+          pointRadius: 3,
+          borderWidth: 2,
+          borderDash: [3,3],
+        },
+        {
+          label: 'Predicted →',
+          data: [],
+          borderColor: '#f472b6',
+          backgroundColor: 'rgba(244,114,182,0.12)',
+          fill: false,
+          tension: 0,
+          pointRadius: 8,
+          pointStyle: 'star',
+          borderWidth: 0,
+          showLine: false,
+        },
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      interaction: { mode: 'index', intersect: false },
+      animation: { duration: 600 },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1e293b',
+          borderColor: 'rgba(255,255,255,0.1)',
+          borderWidth: 1,
+          titleColor: '#94a3b8',
+          bodyColor: '#e2e8f0',
+          padding: 10,
+          callbacks: {
+            label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y?.toFixed(2)} µg/m³`
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'time',
+          time: { unit: 'minute', tooltipFormat: 'HH:mm:ss', displayFormats: { minute: 'HH:mm' } },
+          grid: { color: 'rgba(255,255,255,0.04)' },
+          ticks: { color: '#64748b', maxTicksLimit: 6, font: { family: 'JetBrains Mono', size: 10 } }
+        },
+        y: {
+          grid: { color: 'rgba(255,255,255,0.04)' },
+          ticks: { color: '#64748b', font: { family: 'JetBrains Mono', size: 10 } },
+          title: { display: true, text: 'µg/m³', color: '#475569', font: { size: 10 } }
+        }
+      }
+    }
+  });
+}
+
+// ─── Update UI from API state ───────────────────────────────────────
+function applyState(state) {
+  const c = state.current;
+  const pred = state.prediction;
+
+  // ── PM values
+  setVal('val-pm25', c.PM25, 2);
+  setVal('val-pm10', c.PM10, 2);
+  setVal('val-pm1',  c.PM1,  2);
+  setVal('val-co2',  c.CO2,  1);
+  setVal('val-o3',   c.O3,   2);
+  setVal('val-co',   c.CO,   3);
+  setVal('val-no2',  c.NO2,  2);
+  setVal('val-nox',  c.NOx,  2);
+
+  // ── Extras from ESP32 (Temp, Hum, CH2O/HCHO)
+  if (state.extras) {
+    const ex = state.extras;
+    setVal('val-temp', ex.TEMP, 1);
+    setVal('val-hum',  ex.HUM,  1);
+    setVal('val-ch2o', ex.CH2O, 4);
+  }
+
+  // ── Progress bars (max reference: PM25=200, PM10=300, PM1=100)
+  setBar('bar-pm25', c.PM25, 200);
+  setBar('bar-pm10', c.PM10, 300);
+  setBar('bar-pm1',  c.PM1,  100);
+
+  // ── PM25 colour by AQI
+  const aqiCurrent = state.aqi_current;
+  if (aqiCurrent) {
+    document.getElementById('val-pm25').style.color = aqiCurrent.color;
+    document.getElementById('bar-pm25').style.background = aqiCurrent.color;
+    // AQI label
+    document.getElementById('aqi-label').textContent = aqiCurrent.label;
+    document.getElementById('aqi-label').style.color  = aqiCurrent.color;
+    // Highlight AQI row
+    AQI_LEVELS.forEach(l => {
+      const row = document.getElementById(`aqi-row-${l.index}`);
+      row.classList.toggle('active', l.index === aqiCurrent.index);
+    });
+  }
+
+  // ── Prediction
+  if (pred !== null && pred !== undefined) {
+    document.getElementById('val-pred').textContent = pred.toFixed(2);
+    const aqiP = state.aqi_predicted;
+    if (aqiP) {
+      const badge = document.getElementById('pred-aqi-badge');
+      badge.textContent = aqiP.label;
+      badge.style.background = aqiP.color + '33';
+      badge.style.color = aqiP.color;
+      badge.style.border = `1px solid ${aqiP.color}55`;
+      document.getElementById('pred-legend').style.opacity = '1';
+    }
+  } else {
+    document.getElementById('val-pred').textContent = '–';
+    document.getElementById('pred-aqi-badge').textContent = '–';
+  }
+
+  // ── Buffer progress
+  document.getElementById('buffer-info').textContent =
+    `Buffer: ${state.buffer_size} / ${state.window_needed} readings`;
+
+  // ── Chart  (use {x,y} points + explicit axis bounds so it scrolls correctly)
+  if (state.chart && state.chart.labels.length > 0) {
+    const labels = state.chart.labels;
+
+    // Convert to {x, y} point format — required for time axis to auto-scroll
+    chart.data.labels = [];   // clear label array; x comes from point objects
+    chart.data.datasets[0].data = labels.map((t, i) => ({ x: t, y: state.chart.pm25[i] }));
+    chart.data.datasets[1].data = labels.map((t, i) => ({ x: t, y: state.chart.pm10[i] }));
+    chart.data.datasets[2].data = labels.map((t, i) => ({ x: t, y: state.chart.pm1[i]  }));
+
+    // Force x-axis to always span from oldest → newest+1h so it slides
+    const firstTs = new Date(labels[0]).getTime();
+    const lastTs  = new Date(labels[labels.length - 1]).getTime();
+    const padMs   = Math.max((lastTs - firstTs) * 0.05, 30000);  // 5% padding, min 30 s
+    chart.options.scales.x.min = new Date(firstTs - padMs).toISOString();
+    chart.options.scales.x.max = new Date(lastTs  + padMs + 3600000).toISOString(); // +1h for prediction
+
+    // Predicted point: star at lastTs + 1 hour
+    if (pred !== null && pred !== undefined) {
+      const nextTs = new Date(lastTs + 3600000).toISOString();
+      chart.data.datasets[3].data = [{ x: nextTs, y: pred }];
+    } else {
+      chart.data.datasets[3].data = [];
+    }
+
+    chart.update('none');   // 'none' = instant update, no animation lag on scroll
+  }
+
+  // ── Training distribution warning
+  updateWarning(state.warning);
+
+  // ── Window slots
+  updateWindowSlots(state.chart, state.buffer_size);
+
+  // ── Status badge
+  const badge = document.getElementById('status-badge');
+  badge.className = 'badge live';
+  document.getElementById('status-text').textContent = 'Live';
+  document.getElementById('last-update').textContent =
+    'Updated ' + new Date().toLocaleTimeString();
+}
+
+function setVal(id, val, decimals=2) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const str = (val !== undefined && val !== null && val !== '')
+    ? parseFloat(val).toFixed(decimals)
+    : '–';
+  if (el.textContent !== str) {
+    el.textContent = str;
+    el.classList.remove('flash');
+    void el.offsetWidth;
+    el.classList.add('flash');
+  }
+}
+
+// ── Training distribution warning banner ────────────────────────────
+function updateWarning(w) {
+  const banner = document.getElementById('warning-banner');
+  if (!w || w.level === 'none' || !w.level) {
+    banner.style.display = 'none';
+    return;
+  }
+
+  const isSevere = w.level === 'severe';
+
+  // Show and style banner
+  banner.style.display = 'flex';
+  banner.className = w.level;   // 'marginal' or 'severe'
+
+  // Icon
+  document.getElementById('warn-icon').textContent = isSevere ? '🚨' : '⚠️';
+
+  // Title
+  const title = document.getElementById('warn-title');
+  title.textContent = isSevere
+    ? 'Out of Training Range — Prediction Unreliable'
+    : 'Marginal Training Range — Reduced Accuracy';
+  title.className = `warn-title ${w.level}`;
+
+  // Message (strip the leading ⚠ from server since we have icon)
+  document.getElementById('warn-msg').textContent =
+    w.message.replace(/^⚠\s*/, '');
+
+  // Stats row
+  document.getElementById('warn-your-avg').textContent =
+    w.avg_input_pm25 != null ? w.avg_input_pm25.toFixed(1) : '–';
+  document.getElementById('warn-train-mean').textContent =
+    w.training_mean  != null ? w.training_mean.toFixed(1)  : '–';
+  document.getElementById('warn-train-range').textContent =
+    (w.training_p5 != null && w.training_p95 != null)
+      ? `${w.training_p5.toFixed(1)} – ${w.training_p95.toFixed(1)}`
+      : '–';
+  document.getElementById('warn-zscore').textContent =
+    w.z_score != null ? (w.z_score > 0 ? '+' : '') + w.z_score.toFixed(2) : '–';
+}
+
+function setBar(id, val, max) {
+  const el = document.getElementById(id);
+  if (!el || val === undefined || val === null) return;
+  const pct = Math.min(100, Math.max(0, (parseFloat(val) / max) * 100));
+  el.style.width = pct + '%';
+}
+
+function updateWindowSlots(chartData, bufferSize) {
+  const grid = document.getElementById('window-grid');
+  const slots = [];
+  const labels = chartData?.labels || [];
+  const pm25   = chartData?.pm25   || [];
+
+  for (let i = 0; i < 6; i++) {
+    const filled = i < bufferSize;
+    const active = i === bufferSize - 1;
+    const idx    = i; // oldest first (index 0 = oldest)
+    const pm25val = pm25[idx]?.toFixed(1) ?? '–';
+    const ts     = labels[idx]
+      ? new Date(labels[idx]).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})
+      : '';
+    slots.push(`
+      <div class="window-slot ${filled ? 'filled' : ''} ${active ? 'active' : ''}">
+        <div class="slot-hour">t-${5 - i}h</div>
+        <div class="slot-val" style="color:${filled ? '#38bdf8' : '#334155'}">${filled ? pm25val : '–'}</div>
+        <div class="slot-ts">${ts}</div>
+      </div>
+    `);
+  }
+  grid.innerHTML = slots.join('');
+}
+
+// ─── Polling ─────────────────────────────────────────────────────────
+async function poll() {
+  try {
+    const res  = await fetch('/api/state');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    applyState(data);
+  } catch(e) {
+    document.getElementById('status-badge').className = 'badge error';
+    document.getElementById('status-text').textContent = 'Offline';
+  }
+}
+
+// ─── Simulation mode ─────────────────────────────────────────────────
+function runSimulation() {
+  if (simInterval) {
+    clearInterval(simInterval);
+    simInterval = null;
+    simIndex = 0;
+    document.getElementById('sim-btn').textContent = '▶ Simulate';
+    showToast('Simulation stopped.');
+    return;
+  }
+  document.getElementById('sim-btn').textContent = '⏹ Stop Sim';
+  showToast('Simulation started — injecting readings every 2s…');
+
+  const sendSim = async () => {
+    try {
+      await fetch('/api/simulate', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ index: simIndex++ })
+      });
+      poll();
+    } catch(e) {
+      showToast('⚠ Server unreachable. Is server.py running?');
+    }
+  };
+
+  sendSim();
+  simInterval = setInterval(sendSim, 2000);
+}
+
+// ─── Toast ────────────────────────────────────────────────────────────
+let toastTimer = null;
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 3500);
+}
+
+// ─── Show server URL ──────────────────────────────────────────────────
+function setEndpointUrl() {
+  const el = document.getElementById('endpoint-url');
+  if (el) el.textContent = `POST ${window.location.origin}/api/reading`;
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  initChart();
+  setEndpointUrl();
+  poll();  // immediate first fetch
+  pollingInterval = setInterval(poll, 4000);  // poll every 4 s
+  showToast('Dashboard ready. Click ▶ Simulate or send data from ESP32.');
+});
+</script>
+</body>
+</html>
